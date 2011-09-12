@@ -22,9 +22,6 @@ const (
 	samplingFreq = 1e9 / samplingPeriod // number of samples per second
 )
 
-func inckey(key string, histogram map [string] int) {
-}
-
 func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writer) {
 	ticket := make(chan bool, 42)
 
