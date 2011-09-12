@@ -25,40 +25,29 @@ type EchoTCPBlaster struct{
 	Logger *log.Logger
 }
 
-var (
-	dialStatusText = map [int] string {
-		0: "successful",
-		1: "connection errors",
-	}
-	handlerStatusText = map [int] string {
-		0: "successful",
-		1: "errors while sending",
-		2: "timeout",
-		3: "errors while receiving",
-	}
-)
-
 func NewEchoTCPBlaster(addr string, timeout int64, w io.Writer) (b EchoTCPBlaster) {
 	logger := log.New(w, "", log.Ldate | log.Lmicroseconds)
 	return EchoTCPBlaster{addr, timeout, logger}
 }
 
-func (b EchoTCPBlaster) Dial(debug bool) (conn net.Conn, status int) {
+func (b EchoTCPBlaster) Dial(debug bool) (conn net.Conn, status string) {
 	conn, err := net.Dial("tcp", b.Addr)
 	if err != nil {
-		if debug {	
+		if err, match := err.(net.Error); match && ! err.Temporary() {
+			b.Logger.Fatalln(err.String())
+		} else if debug {	
 			b.Logger.Println(err.String())
 		}
-		return conn, 1
+		return conn, "connection errors"
 	}
 	err = conn.SetTimeout(b.Timeout)
 	if err != nil {
 		b.Logger.Fatalln("could not set socket timeout value: ", err.String())
 	}
-	return conn, 0
+	return conn, ""
 }
 
-func (b EchoTCPBlaster) HandleConn(conn net.Conn, debug bool) (size int, status int) {
+func (b EchoTCPBlaster) HandleConn(conn net.Conn, debug bool) (size int, status string) {
 	n, err := conn.Write([]byte("Hello from tcpblaster!"))
 	if debug {
 		b.Logger.Printf("sent %d byte to %s\n", n, conn.RemoteAddr())
@@ -67,7 +56,7 @@ func (b EchoTCPBlaster) HandleConn(conn net.Conn, debug bool) (size int, status 
 		if debug {
 			b.Logger.Println(err)
 		}
-		return 0, 1
+		return 0, "errors while sending"
 	}
 	buf := make([]byte, n)
 	n, err = conn.Read(buf)
@@ -79,19 +68,11 @@ func (b EchoTCPBlaster) HandleConn(conn net.Conn, debug bool) (size int, status 
 			b.Logger.Println(err)
 		}
 		if err, match := err.(net.Error); match && err.Timeout() {
-			return n, 2
+			return n, "timeouts"
 		}
-		return n, 3
+		return n, "errors while receiving"
 	}
-	return n, 0
-}
-
-func (b EchoTCPBlaster) DialStatusString(status int) string {
-	return dialStatusText[status]
-}
-
-func (b EchoTCPBlaster) HandleConnStatusString(status int) string {
-	return handlerStatusText[status]
+	return n, ""
 }
 
 func main() {
@@ -100,6 +81,6 @@ func main() {
 	if flag.NArg() >= 1 {
 		host = flag.Arg(0)
 	}
-	b := blaster.NewEchoTCPBlaster(host, int64(*timeout * 1e9), os.Stdout)
+	b := NewEchoTCPBlaster(host, int64(*timeout * 1e9), os.Stdout)
 	blaster.Blast(b, *requestTotal, *concurrency, *debug, os.Stdout)
 }

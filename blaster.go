@@ -11,16 +11,10 @@ import (
 type Interface interface {
 	
 	// should return a net.Conn and a status code, which must be 0 for a successful connection
-	Dial(debug bool) (conn net.Conn, status int)
+	Dial(debug bool) (conn net.Conn, status string)
 	
 	// should return the response size in byte and a status code
-	HandleConn(conn net.Conn, debug bool) (size int, status int)
-	
-	// should return a string describing every status code returned by this.Dial() 
-	DialStatusString(status int) string
-	
-	// should return a string describing every status code returned by this.HandleConn()
-	HandleConnStatusString(status int) string
+	HandleConn(conn net.Conn, debug bool) (size int, status string)
 }
 
 const (
@@ -28,7 +22,7 @@ const (
 	samplingFreq = 1e9 / samplingPeriod // number of samples per second
 )
 
-func inckey(key int, histogram map [int] int) {
+func inckey(key string, histogram map [string] int) {
 	count, exist := histogram[key]
 	if !exist {
 		histogram[key] = 1
@@ -37,8 +31,8 @@ func inckey(key int, histogram map [int] int) {
 }
 
 func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writer) {
-	histDial := make(map[int]int) // Dial() status histogram
-	histHandleConn := make(map[int]int) // HandleConn() status histogram
+	histDial := make(map[string]int) // Dial() status histogram
+	histHandleConn := make(map[string]int) // HandleConn() status histogram
 	var statsDial stats.Stats
 	var statsHandleConn stats.Stats
 
@@ -75,7 +69,7 @@ func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writ
 				}
 				conn, status := b.Dial(debug)
 				inckey(status, histDial)
-				if status != 0 {
+				if status != "" {
 					result <- false
 					continue
 				}
@@ -90,7 +84,7 @@ func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writ
 					statsDial.Update(float64(t1 - t0))
 					statsHandleConn.Update(float64(t2 - t0))
 				}
-				if status != 0 {
+				if status != "" {
 					result <- false
 				}
 				result <- true
@@ -132,11 +126,11 @@ L:	for {
 	if replyTotal > 0 {
 		fmt.Fprintf(w, "Connection summary:\n")
 		for status, count := range histDial {
-			fmt.Fprintf(w, "\t%d %s\n", count, b.DialStatusString(status))
+			fmt.Fprintf(w, "\t%d %s\n", count, status)
 		}
 		fmt.Fprintf(w, "Response summary:\n")
 		for status, count := range histHandleConn {
-			fmt.Fprintf(w, "\t%d %s\n", count, b.HandleConnStatusString(status))
+			fmt.Fprintf(w, "\t%d %s\n", count, status)
 		}
 	}
 }
