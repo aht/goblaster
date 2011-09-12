@@ -1,94 +1,142 @@
-// Send tcp requests, receive response and gather statistics.
-
 package blaster
 
 import (
 	"fmt"
 	"io"
 	"net"
-	"log"
-	"os"
 	stats "github.com/GaryBoone/GoStats"
 	"time"
 )
 
 type Interface interface {
-	Dial() (net.Conn, os.Error)
-	HandleConn(net.Conn, bool) bool
+	
+	// should return a net.Conn and a status code, which must be 0 for a successful connection
+	Dial(debug bool) (conn net.Conn, status int)
+	
+	// should return the response size in byte and a status code
+	HandleConn(conn net.Conn, debug bool) (size int, status int)
+	
+	// should return a string describing every status code returned by this.Dial() 
+	DialStatusString(status int) string
+	
+	// should return a string describing every status code returned by this.HandleConn()
+	HandleConnStatusString(status int) string
 }
 
-func Blast(b Interface, requestTotal int, requestRate int, sampFreq float64, w io.Writer, debug bool) {
-	requestTicker := time.NewTicker(int64(1e9 / requestRate))
-	sampleTicker := time.NewTicker(int64(1e9 / (float64(requestRate) * sampFreq)))
-	defer requestTicker.Stop()
-	defer sampleTicker.Stop()
+const (
+	samplingPeriod = 5e9
+	samplingFreq = 1e9 / samplingPeriod // number of samples per second
+)
 
-	connErrorTotal := 0
-	replyErrorTotal := 0
-	var connStats stats.Stats
-	var replyStats stats.Stats
+func inckey(key int, histogram map [int] int) {
+	count, exist := histogram[key]
+	if !exist {
+		histogram[key] = 1
+	}
+	histogram[key] = count + 1
+}
 
-	complete := make(chan bool, 42)
-	logger := log.New(w, "", log.Ldate | log.Lmicroseconds)
+func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writer) {
+	histDial := make(map[int]int) // Dial() status histogram
+	histHandleConn := make(map[int]int) // HandleConn() status histogram
+	var statsDial stats.Stats
+	var statsHandleConn stats.Stats
+
+	ticket := make(chan bool, 42)
+	result := make(chan bool, 42)
+	
+	// issue ticket to workers at the given request rate, optionally tell them to collect a sample
+	go func() {
+		requestTicker := time.NewTicker(int64(1e9 / concurrency))
+		sampleTicker := time.NewTicker(samplingPeriod)
+		defer requestTicker.Stop()
+		defer sampleTicker.Stop()
+		var dosample bool
+		for i := 0; i < requestTotal; i++ {
+			<-requestTicker.C
+			select {
+			case <-sampleTicker.C:
+				dosample = true
+			default:
+				dosample = false
+			}
+			ticket <- dosample
+		}
+	}()
 
 	tStart := time.Nanoseconds()
-	for i := 0; i < requestTotal; i++ {
-		
-		<-requestTicker.C // get a ticket at the request frequency
-		
+	for i := 0; i < concurrency; i++ {
 		go func() {
-			select { // update statistics at the sampling frequency
-			case <-sampleTicker.C:
-				t0 := time.Nanoseconds()
-				conn, err := b.Dial()
-				if err != nil {
-					connErrorTotal++
-					if debug {
-						logger.Println(err.String())
-					}
-					complete <- true
-					return
+			var t0, t1, t2 int64
+			for {
+				dosample := <-ticket
+				if dosample {
+					t0 = time.Nanoseconds()
+				}
+				conn, status := b.Dial(debug)
+				inckey(status, histDial)
+				if status != 0 {
+					result <- false
+					continue
 				}
 				defer conn.Close()
-				t1 := time.Nanoseconds()
-				ok := b.HandleConn(conn, debug)
-				t2 := time.Nanoseconds()
-				if !ok {
-					replyErrorTotal++
+				if dosample {
+					t1 = time.Nanoseconds()
 				}
-				connStats.Update(float64(t1 - t0))
-				replyStats.Update(float64(t2 - t0))
-			default:
-				conn, err := b.Dial()
-				if err != nil {
-					connErrorTotal++
-					if debug {
-						logger.Println(err.String())
-					}
-					complete <- true
-					return
+				_, status = b.HandleConn(conn, debug)
+				inckey(status, histHandleConn)
+				if dosample {
+					t2 = time.Nanoseconds()
+					statsDial.Update(float64(t1 - t0))
+					statsHandleConn.Update(float64(t2 - t0))
 				}
-				defer conn.Close()
-				ok := b.HandleConn(conn, debug)
-				if !ok {
-					replyErrorTotal++
+				if status != 0 {
+					result <- false
 				}
+				result <- true
 			}
-			complete <- true
 		}()
 	}
-	
-	// wait for completion of all handling
-	for i := 0; i < requestTotal; i++ {
-		<-complete
+
+	// wait for completion of all handling, selecting on sampling reply rate periodically
+	sampleTicker := time.NewTicker(samplingPeriod)
+	completeTotal := 0
+	replyTotal := 0
+	intervalTotal := 0
+L:	for {
+		select {
+		case replyReceived := <-result:
+			completeTotal++
+			if replyReceived {
+				replyTotal++
+				intervalTotal++
+			}
+			if completeTotal == requestTotal {
+				sampleTicker.Stop()
+				break L
+			}
+		case <-sampleTicker.C:
+			fmt.Fprintf(w, "reply rate: %.2f\n", samplingFreq * float64(intervalTotal))
+			intervalTotal = 0
+		}
 	}
 	tComplete := time.Nanoseconds()
 	
 	dt := (tComplete - tStart) / 1e9
-	effectiveRate := float64(requestTotal) / float64(dt)
-	fmt.Fprintf(w, "%d requests, duration %d (s), effective rate %.2f (request/s)\n", requestTotal, dt, effectiveRate)
-	fmt.Fprintf(w, "%d samples collected\n", connStats.Size())
-	fmt.Fprintf(w, "Connection time: %.2f ± %.2f (ms)\n", connStats.Mean() / 1000, connStats.SampleStandardDeviation() / 1000)
-	fmt.Fprintf(w, "Reply time: %.2f ± %.2f (ms)\n", replyStats.Mean() / 1000, replyStats.SampleStandardDeviation() / 1000)
-	fmt.Fprintf(w, "Error: %d connection errors, %d reply errors\n", connErrorTotal, replyErrorTotal)
+	fmt.Fprintf(w, "Blast duration %d s\n", dt)
+	fmt.Fprintf(w, "%d requests at %.2f request/s\n", requestTotal, float64(requestTotal) / float64(dt))
+	fmt.Fprintf(w, "%d replys at %.2f reply/s\n", replyTotal, float64(replyTotal) / float64(dt))
+	fmt.Fprintf(w, "%d samples collected\n", statsHandleConn.Size())
+	fmt.Fprintf(w, "Connection time: %.2f ± %.2f (ms)\n", statsDial.Mean() / 1000, statsDial.SampleStandardDeviation() / 1000)
+	fmt.Fprintf(w, "Reply time: %.2f ± %.2f (ms)\n", statsHandleConn.Mean() / 1000, statsHandleConn.SampleStandardDeviation() / 1000)
+	if replyTotal > 0 {
+		fmt.Fprintf(w, "Connection summary:\n")
+		for status, count := range histDial {
+			fmt.Fprintf(w, "\t%d %s\n", count, b.DialStatusString(status))
+		}
+		fmt.Fprintf(w, "Response summary:\n")
+		for status, count := range histHandleConn {
+			fmt.Fprintf(w, "\t%d %s\n", count, b.HandleConnStatusString(status))
+		}
+	}
 }

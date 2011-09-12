@@ -1,0 +1,7 @@
+Massively send network requests, receive responses and gather statistics.
+
+blaster.go:
+	code to blast any network server, client should support blaster.Interface
+
+cmd/blast_echotcp.go:
+	sample client that can blast a host TCP echo server
