@@ -69,11 +69,11 @@ func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writ
 				defer conn.Close()
 				if dosample {
 					t1 = time.Nanoseconds()
+					tDial <- float64(t1 - t0)
 				}
 				_, status = b.HandleConn(conn, debug)
 				if dosample {
 					t2 = time.Nanoseconds()
-					tDial <- float64(t1 - t0)
 					tHandleConn <- float64(t2 - t0)
 				}
 				result <- status
