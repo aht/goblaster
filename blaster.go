@@ -23,22 +23,11 @@ const (
 )
 
 func inckey(key string, histogram map [string] int) {
-	count, exist := histogram[key]
-	if !exist {
-		histogram[key] = 1
-	}
-	histogram[key] = count + 1
 }
 
 func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writer) {
-	histDial := make(map[string]int) // Dial() status histogram
-	histHandleConn := make(map[string]int) // HandleConn() status histogram
-	var statsDial stats.Stats
-	var statsHandleConn stats.Stats
-
 	ticket := make(chan bool, 42)
-	result := make(chan bool, 42)
-	
+
 	// issue ticket to workers at the given request rate, optionally tell them to collect a sample
 	go func() {
 		requestTicker := time.NewTicker(int64(1e9 / concurrency))
@@ -58,6 +47,11 @@ func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writ
 		}
 	}()
 
+	result := make(chan string, 42) // statuses returned by Dial or HandleConn
+	tDial := make(chan float64, 42) // Dial timing samples
+	tHandleConn := make(chan float64, 42) // HandleConn timing samples
+	
+	// spawn as many workers as the requested concurrency level
 	tStart := time.Nanoseconds()
 	for i := 0; i < concurrency; i++ {
 		go func() {
@@ -68,9 +62,8 @@ func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writ
 					t0 = time.Nanoseconds()
 				}
 				conn, status := b.Dial(debug)
-				inckey(status, histDial)
 				if status != "" {
-					result <- false
+					result <- status
 					continue
 				}
 				defer conn.Close()
@@ -78,40 +71,51 @@ func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writ
 					t1 = time.Nanoseconds()
 				}
 				_, status = b.HandleConn(conn, debug)
-				inckey(status, histHandleConn)
 				if dosample {
 					t2 = time.Nanoseconds()
-					statsDial.Update(float64(t1 - t0))
-					statsHandleConn.Update(float64(t2 - t0))
+					tDial <- float64(t1 - t0)
+					tHandleConn <- float64(t2 - t0)
 				}
-				if status != "" {
-					result <- false
-				}
-				result <- true
+				result <- status
 			}
 		}()
 	}
 
-	// wait for completion of all handling, selecting on sampling reply rate periodically
-	sampleTicker := time.NewTicker(samplingPeriod)
+	// wait for completion of all handling, selecting on updating statistics periodically
 	completeTotal := 0
 	replyTotal := 0
 	intervalTotal := 0
+	histogram := make(map[string]int) // histogram of errors
+	
+	sampleTicker := time.NewTicker(samplingPeriod)
+	var statsDial stats.Stats
+	var statsHandleConn stats.Stats
+	
 L:	for {
+		var sample float64
 		select {
-		case replyReceived := <-result:
-			completeTotal++
-			if replyReceived {
-				replyTotal++
-				intervalTotal++
-			}
-			if completeTotal == requestTotal {
-				sampleTicker.Stop()
-				break L
-			}
+		case sample = <-tDial:
+			statsDial.Update(sample)
+		case sample = <-tHandleConn:
+			statsHandleConn.Update(sample)
 		case <-sampleTicker.C:
 			fmt.Fprintf(w, "reply rate: %.2f\n", samplingFreq * float64(intervalTotal))
 			intervalTotal = 0
+		case status := <-result:
+			completeTotal++
+			if status == "" {
+				replyTotal++
+				intervalTotal++
+			} else {
+				count, exist := histogram[status]
+				if !exist {
+					histogram[status] = 1
+				}
+				histogram[status] = count + 1
+			}
+			if completeTotal == requestTotal {
+				break L
+			}
 		}
 	}
 	tComplete := time.Nanoseconds()
@@ -123,13 +127,9 @@ L:	for {
 	fmt.Fprintf(w, "%d samples collected\n", statsHandleConn.Size())
 	fmt.Fprintf(w, "Connection time: %.2f ± %.2f (ms)\n", statsDial.Mean() / 1000, statsDial.SampleStandardDeviation() / 1000)
 	fmt.Fprintf(w, "Reply time: %.2f ± %.2f (ms)\n", statsHandleConn.Mean() / 1000, statsHandleConn.SampleStandardDeviation() / 1000)
-	if replyTotal > 0 {
-		fmt.Fprintf(w, "Connection summary:\n")
-		for status, count := range histDial {
-			fmt.Fprintf(w, "\t%d %s\n", count, status)
-		}
-		fmt.Fprintf(w, "Response summary:\n")
-		for status, count := range histHandleConn {
+	if len(histogram) > 0 {
+		fmt.Fprintf(w, "Errors breakdown:\n")
+		for status, count := range histogram {
 			fmt.Fprintf(w, "\t%d %s\n", count, status)
 		}
 	}
