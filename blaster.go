@@ -85,6 +85,7 @@ func Blast(b Interface, requestTotal int, concurrency int, debug bool, w io.Writ
 	histogram := make(map[string]int) // histogram of errors
 	
 	sampleTicker := time.NewTicker(samplingPeriod)
+	defer sampleTicker.Stop()
 	var statsDial stats.Stats
 	var statsHandleConn stats.Stats
 	
