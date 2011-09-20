@@ -21,13 +21,12 @@ var (
 
 type EchoTCPBlaster struct{
 	Addr string
-	Timeout int64
 	Logger *log.Logger
 }
 
-func NewEchoTCPBlaster(addr string, timeout int64, w io.Writer) (b EchoTCPBlaster) {
-	logger := log.New(w, "", log.Ldate | log.Lmicroseconds)
-	return EchoTCPBlaster{addr, timeout, logger}
+func NewEchoTCPBlaster(addr string) (b EchoTCPBlaster) {
+	logger := log.New(os.Stderr, "", log.Ldate | log.Lmicroseconds)
+	return EchoTCPBlaster{addr, logger}
 }
 
 func (b EchoTCPBlaster) Dial(debug bool) (conn net.Conn, status string) {
@@ -39,10 +38,6 @@ func (b EchoTCPBlaster) Dial(debug bool) (conn net.Conn, status string) {
 			b.Logger.Println(err.String())
 		}
 		return conn, "connection errors"
-	}
-	err = conn.SetTimeout(b.Timeout)
-	if err != nil {
-		b.Logger.Fatalln("could not set socket timeout value: ", err.String())
 	}
 	return conn, ""
 }
@@ -81,6 +76,6 @@ func main() {
 	if flag.NArg() >= 1 {
 		host = flag.Arg(0)
 	}
-	b := NewEchoTCPBlaster(host, int64(*timeout * 1e9), os.Stdout)
-	blaster.Blast(b, *requestTotal, *concurrency, *debug, os.Stdout)
+	b := NewEchoTCPBlaster(host)
+	blaster.Blast(b, *requestTotal, *concurrency, int64(*timeout * 1e9), *debug)
 }
